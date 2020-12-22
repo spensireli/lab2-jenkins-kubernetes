@@ -16,5 +16,5 @@ spec:
     - hard
     - nfsvers=4.1
   nfs:
-    path: /nfsshare/pv0004
+    path: /nfsshare/pv0004/jenkins
     server: 192.168.1.195

@@ -17,16 +17,32 @@ spec:
     spec:
       containers:
       - name: jenkins
+        env:
+        - name: JENKINS_OPTS
+          valueFrom:
+            secretKeyRef:
+              name: jenkins-options
+              key: jenkins-options
         image: jenkins/jenkins:lts
         ports:
-          - name: http-port
-            containerPort: 8080
+          - name: https-port
+            containerPort: 8083
           - name: jnlp-port
             containerPort: 50000
         volumeMounts:
           - name: jenkins-pv-storage
             mountPath: /var/jenkins_home
+          - name: jenkins-secret
+            mountPath: /var/lib/jenkins/pki/
       volumes:
         - name: jenkins-pv-storage
           persistentVolumeClaim:
             claimName: pv0004-jenkins
+        - name: jenkins-secret
+          secret:
+            secretName: jenkins
+            items:
+              - key: jenkins.jks
+                path: jenkins.jks
+
+

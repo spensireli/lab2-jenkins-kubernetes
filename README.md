@@ -1,10 +1,8 @@
 # Lab2 A Persistent Jenkins server deployed onto Kubernetes
-This project will walk through how to deploy a Jenkins server that is persistent.
+This project will walk through how to deploy a Jenkins server that is persistent with TLS encryption.
 
 *Note this lab is not for production use.*
 
-### Future Enhancements
-- TLS for encryption in transit
 
 ### Lab configuration
 Below you will find the specifications for the environment used to run this lab. I am confident the lab is able to run on much less hardware or even on a set of Raspberry Pi's.
@@ -36,6 +34,17 @@ Below you will find the specifications for the environment used to run this lab.
 
 It is suggested that you go through the first lab before executing this one. This lab requires that you have an NFS server to mount your persistent volume to.  
 
+
+#### TLS Key Creation
+
+Before we begin the lab lets create a selfsigned TLS certificate for our Jenkins server. This will allow encryption in transit from the client to the server. To do this create a java keystore using the commands below replacing `<yourpassword>` with a secure unique password.
+
+```bash
+ keytool -genkey -keyalg RSA -alias selfsigned -keystore jenkins_keystore.jks -storepass <yourpassword> -keysize 2048
+ ```
+
+Upon completion of the command you will be left with a file called `jenkins_keystore.jks`. This will be important later on when we add this file to Kubernetes as a secret.
+
 #### Jenkins Namespace
 
 First we must create a namespace for our Jenkins server to live. Create a file called `jenkins-ns.yaml`.
@@ -66,6 +75,51 @@ kube-node-lease   Active   13d
 kube-public       Active   13d
 kube-system       Active   13d
 ```
+
+#### Jenkins Secrets
+
+Before we begin lets create two secrets that we will use later on in this configuration. Create a file called `jenkins-secrets.yaml`. In this file paste the following.
+
+```yaml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jenkins
+  namespace: jenkins
+type: Opaque
+data:
+  jenkins.jks: |
+    <BASE 64 ENCODED .JKS>
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jenkins-options
+  namespace: jenkins
+type: Opaque
+data:
+  jenkins-options: |
+    <BASE 64 ENCODED STARTUP OPTIONS>
+```
+
+As you may have noted the we must add the base64 encoded values of our java key store and our java key store password.
+
+To get the base64 encoded values for your `.jks` run the following commands on the `.jks` file we created earlier.
+
+```bash
+$ cat jenkins_keystore.jks |base64
+```
+Copy the output and pate it in the `<BASE 64 ENCODED .JKS>` section of the secret file.
+
+Now we must do the same for the password. However I am going to take the entire string of Jenkins startup options and pass it as a secret like so.
+
+```bash
+
+$ echo "--httpPort=-1 --httpsPort=8083 --httpsKeyStore=/var/lib/jenkins/pki/jenkins.jks --httpsKeyStorePassword=<Your Password Plaintext>" |base64
+```
+Copy the output and replace `<BASE 64 ENCODED STARTUP OPTIONS>` in the `jenkins-secrets.yaml`.
+
 
 #### Persistent Volume
 
@@ -264,11 +318,15 @@ Once we have the persistent volume and claim created we can now deploy the conta
 
 What we are doing is configuring a container with a single replica with a label `jenkins`.
 
-This is going to be deployed to the `jenkins` namespace that we first created. We are running the container on port `8080` and `50000`. The important component here for persistent data between deletion is the `volumeMounts`.
+This is going to be deployed to the `jenkins` namespace that we first created. We are running the container on port `8083` and `50000`. The important component here for persistent data between deletion is the `volumeMounts`.
 
 You may note that we have defined our volume mount as `jenkins-pv-storage` which it gets from the `volumes` section. The `volumes` section declares this as the persistent volume claim we created earlier called `pv0004-jenkins`.
 
 This volume is mounted inside the container to `/var/jenkins_home`.
+
+We also are mounting a secret `jenkins` which is looking at secret `jenkins.jks`. This is our Java Key Store that will be used for TLS in the Jenkins configuration. We are mounting this to a directory called `/var/lib/jenkins/pki/`.
+
+You may also note in the `env` we are setting startup options from a secret. This secret `jenkins-options` contains the startup options as well as the JKS password required to use the java key store.
 
 Create a file called `jenkins-deployment.yaml` and add the following.
 
@@ -293,19 +351,33 @@ spec:
     spec:
       containers:
       - name: jenkins
+        env:
+        - name: JENKINS_OPTS
+          valueFrom:
+            secretKeyRef:
+              name: jenkins-options
+              key: jenkins-options
         image: jenkins/jenkins:lts
         ports:
-          - name: http-port
-            containerPort: 8080
+          - name: https-port
+            containerPort: 8083
           - name: jnlp-port
             containerPort: 50000
         volumeMounts:
           - name: jenkins-pv-storage
             mountPath: /var/jenkins_home
+          - name: jenkins-secret
+            mountPath: /var/lib/jenkins/pki/
       volumes:
         - name: jenkins-pv-storage
           persistentVolumeClaim:
             claimName: pv0004-jenkins
+        - name: jenkins-secret
+          secret:
+            secretName: jenkins
+            items:
+              - key: jenkins.jks
+                path: jenkins.jks
 ```
 
 Deploy the jenkins container.
@@ -325,7 +397,7 @@ jenkins-6ff8d69b-7rl9d   1/1     Running   0          56s   10.244.1.9   kuberne
 
 #### Jenkins Service
 
-Here we are creating two services to expose the container ports that we declared in the deployment. We declare the port that the service is running on in the container `8080` and what we would like it to be broadcast as on the hosts `nodePort` which is port `30000`.
+Here we are creating two services to expose the container ports that we declared in the deployment. We declare the port that the service is running on in the container `8083` and what we would like it to be broadcast as on the hosts `nodePort` which is port `30000`.
 
 We are doing the same thing for the service `jenkins-jnlp` however not exposing the port to the node.
 
@@ -341,8 +413,8 @@ metadata:
 spec:
   type: NodePort
   ports:
-    - port: 8080
-      targetPort: 8080
+    - port: 8083
+      targetPort: 8083
       nodePort: 30000
   selector:
     app: jenkins
@@ -399,7 +471,7 @@ NAME                  STATUS   ROLES    AGE   VERSION   INTERNAL-IP     EXTERNAL
 kubernetes-worker-1   Ready    <none>   13d   v1.19.3   192.168.1.200   <none>        Ubuntu 20.04 LTS   5.4.0-53-generic   docker://19.3.8
 ```
 
-Open your web browser and navigate to the address and port `30000`. For example `http://192.168.1.200:30000`.
+Open your web browser and navigate to the address and port `30000`. For example `https://192.168.1.200:30000`.
 
 You will be prompted with the following screen if it is your first time logging in.
 
@@ -474,6 +546,7 @@ $ kubectl delete -f jenkins-pvc.yaml
 persistentvolumeclaim "pv0004-jenkins" deleted
 $ kubectl delete -f jenkins-pv.yaml
 persistentvolume "pv0004-jenkins" deleted
+$ kubectl delete -f jenkins-secrets.yaml
 $ kubectl delete -f jenkins-ns.yaml
 namespace "jenkins" deleted
 ```
